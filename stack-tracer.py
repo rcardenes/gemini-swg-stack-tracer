@@ -116,7 +116,8 @@ class MemMap(object):
             print(colorize("--^ {0:08x} {1}".format(addr, fdis.name), 'bright_yellow'))
             fdis.print_context_for(addr)
         for step_address in reversed(trace.stack):
-            prn_addr(step_address)
+            # Function calls link to the *next* instruction
+            prn_addr(step_address - 4)
         prn_addr(trace.exception_address)
 
 class MemMapFile(object):
