@@ -20,24 +20,19 @@ COLORS = {
 def colorize(text, color):
     return "\x1b[{0}m{1}\x1b[0m".format(COLORS[color], text)
 
-class CodeLine(object):
-    def __init__(self, path, line_no):
-        self.path = path
-        self.line_no = line_no
+class CodeBlock(object):
+    def __init__(self):
+        self.text = []
         self.code = []
 
     def __contains__(self, address):
         return any(c.address == address for c in self.code)
 
     def print(self):
-        try:
-            code_lines = open(self.path).readlines()
-            for ln in range(self.line_no - 5, self.line_no + 6):
-                if ln >= 1:
-                    marker = '>' if ln == self.line_no else ' '
-                    print("  {0} {1}".format(marker, code_lines[ln-1].strip()))
-        except IOError:
-            print("  ????")
+        for t in self.text:
+            print("    {0}".format(t))
+        for c in self.code:
+            print("    {0:08x}  {1}".format(c.address, c.text))
 
 class FunctionDisassembly(object):
     def __init__(self, name):
@@ -58,13 +53,18 @@ class FunctionDisassembly(object):
         except IndexError:
             raise RuntimeError("FunctionDisassembly object {} seems to be fucked up".format(self.name))
 
-    def add_line(self, line_no, path):
-        self.lines.append(CodeLine(path, int(line_no)))
-
     def add_assembly(self, address, code):
-        if not self.lines:
-            self.lines.append(CodeLine(None, None))
         self.lines[-1].code.append(Assembly(address, code))
+
+    def add_text(self, line):
+        try:
+            path, line_no = line.split(':')
+            self.lines[-1].text.append("{}:{}".format(os.path.abspath(path), int(line_no)))
+        except ValueError:
+            self.lines[-1].text.append(line)
+
+    def new_block(self):
+        self.lines.append(CodeBlock())
 
     def print_context_for(self, address):
         for line in self.lines:
@@ -119,52 +119,79 @@ class MemMap(object):
             prn_addr(step_address)
         prn_addr(trace.exception_address)
 
+class MemMapFile(object):
+    def __init__(self, path):
+        self.fd = open(path)
+        self.line_no = 0
+        self.buffer = None
+
+    def next(self):
+        if self.buffer is None:
+            next_line = self.fd.readline()
+        else:
+            next_line = self.buffer
+            self.buffer = None
+        if next_line == "":
+            raise StopIteration()
+        self.line_no += 1
+        return next_line[:-1]
+
+    def rollback(self, line):
+        self.buffer = line + '\n'
+
+        self.line_no -= 1
+
 object_header_re = re.compile("[0-9a-f]+ <(?P<name>[^>]+)>")
 assembly_re = re.compile("^ *(?P<addr>[0-9a-f]+):\t(?P<code>.*)$")
 
-def read_memmap(fobject):
+def read_memmap(mmfile):
     reading_disassembly = False
-    reading_object = False
     current_object = None
     object_list = []
-    line_no = 0
-    for line in fobject:
-        line_no += 1
-        line = line.strip()
+    try:
+        while True:
+            line = mmfile.next()
 
-        if not line:
-            continue
-        elif line.startswith('Disassembly of section'):
-                reading_disassembly = True
-                if current_object:
-                    current_object.update()
-                current_object = None
-                reading_object = False
-        else:
-            matched = object_header_re.match(line)
-            if matched:
-                if current_object:
-                    current_object.update()
+            if not line:
+                continue
+            elif not reading_disassembly:
+                if line.startswith('Disassembly of section'):
+                    reading_disassembly = True
+                    current_object = None
+            else:
+                matched = object_header_re.match(line)
+                if not matched:
+                    continue
                 current_object = FunctionDisassembly(matched.group('name'))
                 object_list.append(current_object)
-            elif current_object is not None:
-                assm = assembly_re.match(line)
+                # Skip next line
+                mmfile.next()
+                while True:
+                    current_object.new_block()
+                    while True:
+                        line = mmfile.next()
+                        assm = assembly_re.match(line)
+                        if assm:
+                            break
+                        current_object.add_text(line)
 
-                if line.endswith('():'):
-                    continue
-                elif assm:
-                    current_object.add_assembly(int(assm.group('addr'), 16), assm.group('code'))
-                else:
-                    try:
-                        path, pline_no = line.split(':')
-                        if pline_no.isdigit():
-                            current_object.add_line(pline_no, os.path.abspath(path))
-                    except ValueError:
-                        # Probably embedded code. Ignore
-                        pass
+                    while assm:
+                        current_object.add_assembly(int(assm.group('addr'), 16), assm.group('code'))
+                        line = mmfile.next()
+                        assm = assembly_re.match(line)
+
+                    if not line.strip():
+                        current_object.update()
+                        current_object = None
+                        break
+                    else:
+                        mmfile.rollback(line)
+
+    except StopIteration:
+        if current_object is not None:
+            current_object.update()
 
     if object_list:
-        object_list[-1].update()
         return MemMap(RangeTree(object_list))
 
 def read_stack_trace(fobject):
@@ -188,8 +215,7 @@ def read_stack_trace(fobject):
     return Trace(ip, stack)
 
 if __name__ == '__main__':
-    with open(sys.argv[1]) as mmfile:
-        with open(sys.argv[2]) as trace:
-            rt = read_memmap(mmfile)
-            st = read_stack_trace(trace)
-            rt.print_trace(st)
+    with open(sys.argv[2]) as trace:
+        rt = read_memmap(MemMapFile(sys.argv[1]))
+        st = read_stack_trace(trace)
+        rt.print_trace(st)
