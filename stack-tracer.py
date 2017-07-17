@@ -28,11 +28,14 @@ class CodeBlock(object):
     def __contains__(self, address):
         return any(c.address == address for c in self.code)
 
-    def print(self):
+    def print(self, mark=None):
         for t in self.text:
             print("    {0}".format(t))
         for c in self.code:
-            print("    {0:08x}  {1}".format(c.address, c.text))
+            text = "    {0:08x}  {1}".format(c.address, c.text)
+            print(colorize(text, 'bright_green')
+                    if mark and mark == c.address
+                    else text)
 
 class FunctionDisassembly(object):
     def __init__(self, name):
@@ -69,7 +72,7 @@ class FunctionDisassembly(object):
     def print_context_for(self, address):
         for line in self.lines:
             if address in line:
-                line.print()
+                line.print(mark=address)
                 break
         else:
             raise RuntimeError("The address was not here!")
