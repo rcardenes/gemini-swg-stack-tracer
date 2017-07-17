@@ -10,6 +10,16 @@ from collections import namedtuple
 Assembly = namedtuple('Assembly', 'address text')
 Trace = namedtuple('Trace', 'exception_address stack')
 
+COLORS = {
+    'green': '32',
+    'bright_green': '32;1',
+    'yellow': '33',
+    'bright_yellow': '33;1',
+}
+
+def colorize(text, color):
+    return "\x1b[{0}m{1}\x1b[0m".format(COLORS[color], text)
+
 class CodeLine(object):
     def __init__(self, path, line_no):
         self.path = path
@@ -103,7 +113,7 @@ class MemMap(object):
     def print_trace(self, trace):
         def prn_addr(addr):
             fdis = self.rtree.get(addr)
-            print("--^ {0:08x} {1}".format(addr, fdis.name))
+            print(colorize("--^ {0:08x} {1}".format(addr, fdis.name), 'bright_yellow'))
             fdis.print_context_for(addr)
         for step_address in reversed(trace.stack):
             prn_addr(step_address)
