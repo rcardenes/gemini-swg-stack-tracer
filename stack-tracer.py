@@ -11,6 +11,8 @@ Assembly = namedtuple('Assembly', 'address text')
 Trace = namedtuple('Trace', 'exception_address stack')
 
 COLORS = {
+    'red': '31',
+    'bright_red': '31;1',
     'green': '32',
     'bright_green': '32;1',
     'yellow': '33',
@@ -124,8 +126,8 @@ class MemMap(object):
         prn_addr(trace.exception_address)
 
 class MemMapFile(object):
-    def __init__(self, path):
-        self.fd = open(path)
+    def __init__(self, open_file):
+        self.fd = open_file
         self.line_no = 0
         self.buffer = None
 
@@ -218,8 +220,41 @@ def read_stack_trace(fobject):
 
     return Trace(ip, stack)
 
+USAGE_STRING = """
+Stack Tracer:
+
+    stack-tracer <mem-map file> <stack trace>
+
+The stack trace can have any content (comments, etc). The only
+relevant lines are the ones between the "Stack Trace:" line and
+"Suspending [...]". Eg:
+
+   Stack Trace:
+    IP: 0x0012EFC8, LR: 0x0011D450
+   --^ 0x0001A48C--^ 0x00018F9C--^ 0x000EC690--^ 0x000F0E64--^ 0x000EE044
+   --^ 0x000E0AB8--^ 0x000E7094--^ 0x00136048--^ 0x00135F6C
+   Suspending faulting task (0x0A010012)
+
+Everything else will be ignored. Only one stack trace (the first) will be
+processed.
+"""
+
+def usage(error_message = None):
+    if error_message:
+        print(colorize(error_message, 'bright_red'))
+    print(USAGE_STRING)
+    sys.exit(1)
+
+def get_arguments():
+    try:
+        return open(sys.argv[1]), open(sys.argv[2])
+    except IndexError:
+        usage()
+    except IOError as e:
+        usage(str(e))
+
 if __name__ == '__main__':
-    with open(sys.argv[2]) as trace:
-        rt = read_memmap(MemMapFile(sys.argv[1]))
-        st = read_stack_trace(trace)
-        rt.print_trace(st)
+    map_file, trace_file = get_arguments()
+    rt = read_memmap(MemMapFile(map_file))
+    st = read_stack_trace(trace_file)
+    rt.print_trace(st)
