@@ -117,9 +117,13 @@ class MemMap(object):
 
     def print_trace(self, trace):
         def prn_addr(addr):
-            fdis = self.rtree.get(addr)
-            print(colorize("--^ {0:08x} {1}".format(addr, fdis.name), 'bright_yellow'))
-            fdis.print_context_for(addr)
+            try:
+                fdis = self.rtree.get(addr)
+            except IndexError:
+                print(colorize("--^ {0:08x} ????".format(addr), 'bright_red'))
+            else:
+                print(colorize("--^ {0:08x} {1}".format(addr, fdis.name), 'bright_yellow'))
+                fdis.print_context_for(addr)
         for step_address in reversed(trace.stack):
             # Function calls link to the *next* instruction
             prn_addr(step_address - 4)
