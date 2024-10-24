@@ -190,7 +190,9 @@ def read_memmap(mmfile):
                         line = mmfile.next()
                         assm = assembly_re.match(line)
 
-                    if not line.strip():
+                    if line.startswith("Contents of"):
+                        raise StopIteration
+                    elif not line.strip():
                         current_object.update()
                         current_object = None
                         break
