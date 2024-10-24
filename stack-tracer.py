@@ -209,19 +209,22 @@ def read_memmap(mmfile):
 def read_stack_trace(fobject):
     reading_st = False
     line_no = 0
+    column = 0
     ip = None
     stack = []
     for line in fobject:
         line_no += 1
         if reading_st:
-            if "IP:" in line:
-                ip = int(line.split(',')[0].split('x')[-1], 16)
-            elif line.startswith("--^"):
-                addresses = line.split('--^')[1:]
+            trunc_line = line[column:]
+            if "IP:" in trunc_line:
+                ip = int(trunc_line.split(',')[0].split('x')[-1], 16)
+            elif trunc_line.startswith("--^"):
+                addresses = trunc_line.split('--^')[1:]
                 stack.extend((int(x.split('x')[1], 16) for x in addresses))
             elif "Suspending" in line:
                 break
-        elif line.startswith("Stack Trace"):
+        elif "Stack Trace" in line:
+            column = line.find("Stack Trace")
             reading_st = True
 
     return Trace(ip, stack)
