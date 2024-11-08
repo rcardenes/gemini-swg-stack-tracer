@@ -1,7 +1,7 @@
-use std::{borrow::BorrowMut, fs::File, io::{BufRead, BufReader, Read}, path::{Path, PathBuf}};
+use std::{fs::File, io::{BufRead, BufReader, Read}, path::{Path, PathBuf}};
 
 use anyhow::Result;
-use regex::Regex;
+use regex::{Captures, Regex};
 
 static USAGE_STRING: &str = r#"
 Stack Tracer:
@@ -112,16 +112,32 @@ impl FunctionDisassembly {
         }
     }
 
-    fn add_assembly(&mut self, address: &str, code: &str) {
-        self.lines.last_mut().unwrap().code.push(Assembly::new(address, code));
+    fn contains(&self, address: usize) -> bool {
+        (self.first <= address) && (address <= self.last)
     }
 
-    fn add_text(&mut self, line: &str) {
-        self.lines.last_mut().unwrap().text.push(line.into())
-    }
-
-    fn new_block(&mut self) {
+    fn new_block(mut self) -> Self {
         self.lines.push(CodeBlock::new());
+        self
+    }
+
+    fn add_assembly(mut self, address: &str, code: &str) -> Self {
+        self.lines.last_mut().unwrap().code.push(Assembly::new(address, code));
+        self
+    }
+
+    fn add_text(mut self, line: &str) -> Self {
+        self.lines.last_mut().unwrap().text.push(line.into());
+        self
+    }
+
+    fn update(&mut self) {
+        if self.lines.is_empty() {
+            panic!("Updating an empty FunctionDisassembly!");
+        }
+
+        self.first = self.lines.first().unwrap().code.first().unwrap().address;
+        self.last = self.lines.last().unwrap().code.last().unwrap().address;
     }
 
     fn print_context_for(&self, address: usize) {
@@ -138,6 +154,7 @@ struct MemMapFile<R> {
     fd: BufReader<R>,
     line_no: usize,
     buffer: Option<String>,
+    invalidated: bool,
 }
 
 impl<R> MemMapFile<R>
@@ -147,40 +164,102 @@ impl<R> MemMapFile<R>
         MemMapFile {
             fd,
             line_no: 0,
-            buffer: None
+            buffer: None,
+            invalidated: false,
         }
     }
 
     fn next(&mut self) -> Option<String> {
-        let next_line = match self.buffer.take() {
-            Some(line) => line,
-            None => {
-                let mut line = String::new();
-                if self.fd.read_line(&mut line).unwrap() == 0 {
-                    return None
+        if self.invalidated {
+            None
+        } else {
+            let next_line = match self.buffer.take() {
+                Some(line) => line,
+                None => {
+                    let mut line = String::new();
+                    if self.fd.read_line(&mut line).unwrap() == 0 {
+                        return None
+                    }
+                    if line.ends_with("\n") {
+                        line.pop();
+                    }
+                    line
                 }
-                if line.ends_with("\n") {
-                    line.pop();
-                }
-                line
-            }
-        };
-        self.line_no += 1;
-        Some(next_line)
+            };
+            self.line_no += 1;
+            Some(next_line)
+        }
     }
 
     fn  rollback(&mut self, line: String) {
         self.buffer = Some(line);
         self.line_no -= 1;
     }
+
+    fn done(&mut self) {
+        self.invalidated = true;
+    }
 }
 
-struct RangeTreeNode {
-    start_address: usize,
-    middle_address: usize,
-    last_address: usize,
-    left: Option<Box<RangeTreeNode>>,
-    right: Option<Box<RangeTreeNode>>,
+enum RangeTreeNode {
+    Single(FunctionDisassembly),
+    Ranged {
+        start_address: usize,
+        middle_address: usize,
+        last_address: usize,
+        left: Box<RangeTreeNode>,
+        right: Box<RangeTreeNode>,
+    }
+}
+
+impl RangeTreeNode {
+    fn single(leaf: FunctionDisassembly) -> Self {
+        RangeTreeNode::Single(leaf)
+    }
+
+    fn new(mut obj_list: Vec<FunctionDisassembly>) -> Self {
+        if obj_list.len() == 1 {
+            RangeTreeNode::Single(obj_list.pop().unwrap())
+        } else {
+            let pivot = obj_list.len() / 2;
+            let mut right = obj_list.split_off(pivot);
+            let mut left = obj_list;
+            let start_address = left.first().unwrap().first;
+            let middle_address = right.first().unwrap().first;
+            let last_address = right.last().unwrap().last;
+
+            RangeTreeNode::Ranged {
+                start_address,
+                middle_address,
+                last_address,
+                left: Box::new(if left.len() == 1 { RangeTreeNode::Single(left.pop().unwrap()) } else { RangeTreeNode::new(left) }),
+                right: Box::new(if right.len() == 1 { RangeTreeNode::Single(right.pop().unwrap()) } else { RangeTreeNode::new(right) }),
+            }
+        }
+    }
+
+    fn contains(&self, address: usize) -> bool {
+        match self {
+            RangeTreeNode::Single(fd) => {
+                fd.contains(address)
+            }
+            RangeTreeNode::Ranged { start_address, last_address, .. } => {
+                (address >= *start_address) && (address <= *last_address)
+            }
+        }
+    }
+
+    fn get(&self, address: usize) -> &FunctionDisassembly {
+        if !self.contains(address) {
+            panic!("Address not found: {address:#010x}")
+        }
+
+        match self {
+            RangeTreeNode::Single(fa) => fa,
+            RangeTreeNode::Ranged { middle_address, left, right, ..} => {
+            }
+        }
+    }
 }
 
 struct RangeTree {
@@ -188,24 +267,37 @@ struct RangeTree {
 }
 
 impl RangeTree {
+    fn new(object_list: Vec<FunctionDisassembly>) -> Self {
+        RangeTree {
+            root: RangeTreeNode::new(object_list)
+        }
+    }
+
     fn get(&self, address: usize) -> &RangeTreeNode {
         todo!()
     }
 }
 
-fn read_function<R>(mmfile: &mut MemMapFile<R>, mut object: FunctionDisassembly) -> FunctionDisassembly
-    where R: Read
-{
-    // Skip the next line, it's always a label with the function name
-    mmfile.next();
+struct MemMap {
+    rtree: RangeTree,
+}
 
-    loop {
-        let line = mmfile.next();
-
+impl MemMap {
+    fn new(rtree: RangeTree) -> Self {
+        MemMap {
+            rtree
+        }
     }
 }
 
-fn read_memmap<R>(mmfile: MemMapFile<R>)
+enum MemMapReaderState {
+    Init,
+    FindingObject,
+    ProcessingObject,
+    ProcessingAssembly,
+}
+
+fn read_memmap<R>(mmfile: MemMapFile<R>) -> MemMap
     where R: Read,
 {
     let mut mmfile = mmfile;
@@ -213,6 +305,7 @@ fn read_memmap<R>(mmfile: MemMapFile<R>)
     let mut reading_disassembly = false;
     let mut current_object: Option<FunctionDisassembly> = None;
     let mut object_list: Vec<FunctionDisassembly> = vec![];
+    let mut status = MemMapReaderState::Init;
 
     let object_header_re = Regex::new("[0-9a-f]+ <(?P<name>[^>]+)>").unwrap();
     let assembly_re = Regex::new("^ *(?P<addr>[0-9a-f]+):\t(?P<code>.*)$").unwrap();
@@ -220,34 +313,73 @@ fn read_memmap<R>(mmfile: MemMapFile<R>)
     loop {
         match mmfile.next() {
             Some(line) => {
-                if line.is_empty() {
-                    continue;
-                }
-
-                if !reading_disassembly {
-                    if line.starts_with("Disassembly of section") {
-                        reading_disassembly = true;
-                        current_object = None;
+                match status {
+                    MemMapReaderState::Init => {
+                        if line.starts_with("Disassembly of section") {
+                            status = MemMapReaderState::FindingObject;
+                            current_object = None;
+                        }
                     }
-                } else {
-                    let matches = match object_header_re.captures(&line) {
-                        Some(m) => m,
-                        None => continue,
-                    };
-
-
-                    read_function(&mut mmfile, FunctionDisassembly::new(&matches["name"]));
-                }
+                    MemMapReaderState::FindingObject => {
+                        match object_header_re.captures(&line) {
+                            Some(m) => {
+                                status = MemMapReaderState::ProcessingObject;
+                                let mut new_object = FunctionDisassembly::new(&m["name"]);
+                                let old_object = current_object.replace(new_object.new_block());
+                                if let Some(object) = old_object {
+                                    object_list.push(object);
+                                }
+                                // Skip the next line, it's redundant
+                                mmfile.next();
+                            },
+                            None => continue,
+                        };
+                    }
+                    MemMapReaderState::ProcessingObject => {
+                        if assembly_re.is_match(&line) {
+                            status = MemMapReaderState::ProcessingAssembly;
+                            mmfile.rollback(line);
+                        } else {
+                            current_object = current_object.map(|fa| {
+                                fa.add_text(&line)
+                            });
+                        }
+                    }
+                    MemMapReaderState::ProcessingAssembly => {
+                        if let Some(cap) = assembly_re.captures(&line) {
+                            current_object = current_object.map(|fa| {
+                                fa.add_assembly(&cap["addr"], &cap["code"])
+                            });
+                        } else if line.starts_with("Contents of") {
+                            mmfile.done();
+                        } else if line.trim().is_empty() {
+                            if let Some(mut obj) = current_object.take() {
+                                obj.update();
+                                object_list.push(obj);
+                            }
+                            status = MemMapReaderState::FindingObject;
+                        } else {
+                            current_object = current_object.map(|mut fa| {
+                                fa.new_block()
+                            });
+                            mmfile.rollback(line);
+                            status = MemMapReaderState::ProcessingObject;
+                        }
+                    }
+                };
             }
             None => {
-                // TODO: See if this makes sense
-                //   if current_object.is_some() -> current_object.update()
+                if let Some(mut object) = current_object {
+                   object.update();
+                   object_list.push(object);
+                   // TODO: And now... do something with it?
+                }
                 break;
             }
         }
     }
 
-    todo!()
+    MemMap::new(RangeTree::new(object_list))
 }
 
 fn usage(error_message: Option<&str>) -> ! {
@@ -290,7 +422,8 @@ fn get_streams() -> (BufReader<File>, BufReader<File>) {
 }
 
 fn main() {
-    let (_map_file, _trace_file) = get_streams();
+    let (map_file, _trace_file) = get_streams();
+    let _rt = read_memmap(MemMapFile::new(map_file));
 
     todo!()
 }
